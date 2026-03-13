@@ -5,6 +5,8 @@ const connectDB = require('./lib/mongodb');
 
 const playerRoutes = require('./routes/players');
 const teamRoutes = require('./routes/teams');
+const authRoutes = require('./routes/auth');
+const matchRoutes = require('./routes/matches');
 
 const app = express();
 
@@ -18,6 +20,8 @@ app.use(async (_req, _res, next) => {
 
 app.use('/api/players', playerRoutes);
 app.use('/api/teams', teamRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/matches', matchRoutes);
 
 app.get('/', (_req, res) => {
   res.json({ status: 'CricTracker API is running' });
