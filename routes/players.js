@@ -1,5 +1,7 @@
 const express = require('express');
 const Player = require('../models/Player');
+const User = require('../models/User');
+const { authenticate, requireAdmin } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -22,23 +24,45 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', authenticate, requireAdmin, async (req, res) => {
   try {
+    const { name, role, jersey, email, password } = req.body;
+
+    if (email) {
+      const existing = await User.findOne({ email: email.toLowerCase() });
+      if (existing) {
+        return res.status(409).json({ error: 'Email already registered' });
+      }
+    }
+
     const player = await Player.create({
-      name: req.body.name,
-      role: req.body.role,
-      jersey: req.body.jersey || '-',
+      name,
+      role,
+      jersey: jersey || '-',
     });
+
+    if (email && password) {
+      await User.create({
+        name,
+        email,
+        password,
+        role: 'user',
+        approved: true,
+        linkedPlayer: player._id,
+      });
+    }
+
     res.status(201).json(player);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
   try {
     const player = await Player.findByIdAndDelete(req.params.id);
     if (!player) return res.status(404).json({ error: 'Player not found' });
+    await User.findOneAndDelete({ linkedPlayer: req.params.id });
     res.json({ message: 'Player deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
