@@ -705,16 +705,27 @@ router.post(
       if (match.innings.length === 2) {
         const inn1 = match.innings[0];
         const inn2 = match.innings[1];
+
+        const Team = require('../models/Team');
+        const teamADoc = await Team.findById(match.teamA).select('name');
+        const teamBDoc = await Team.findById(match.teamB).select('name');
+        function teamNameFor(battingTeamId) {
+          const id = battingTeamId.toString();
+          if (id === match.teamA.toString()) return teamADoc?.name || 'Team A';
+          return teamBDoc?.name || 'Team B';
+        }
+
         if (inn2.totalRuns > inn1.totalRuns) {
           match.winner = inn2.battingTeam;
           const wicketsLeft =
             (await getTeamPlayerCount(inn2.battingTeam)) -
             1 -
             inn2.wickets;
-          match.result = `${inn2.battingTeam === match.teamA ? 'Team A' : 'Team B'} won by ${wicketsLeft} wicket${wicketsLeft !== 1 ? 's' : ''}`;
+          match.result = `${teamNameFor(inn2.battingTeam)} won by ${wicketsLeft} wicket${wicketsLeft !== 1 ? 's' : ''}`;
         } else if (inn1.totalRuns > inn2.totalRuns) {
           match.winner = inn1.battingTeam;
-          match.result = `${inn1.battingTeam === match.teamA ? 'Team A' : 'Team B'} won by ${inn1.totalRuns - inn2.totalRuns} run${inn1.totalRuns - inn2.totalRuns !== 1 ? 's' : ''}`;
+          const runDiff = inn1.totalRuns - inn2.totalRuns;
+          match.result = `${teamNameFor(inn1.battingTeam)} won by ${runDiff} run${runDiff !== 1 ? 's' : ''}`;
         } else {
           match.result = 'Match Tied';
         }
@@ -727,7 +738,11 @@ router.post(
       match.status = 'completed';
       await match.save();
 
-      await aggregatePlayerStats(match);
+      try {
+        await aggregatePlayerStats(match);
+      } catch (statsErr) {
+        console.error('Stats aggregation error (non-fatal):', statsErr);
+      }
 
       const populated = await populateMatch(Match.findById(match._id));
       res.json(populated);
@@ -754,48 +769,52 @@ async function aggregatePlayerStats(match) {
   }
 
   for (const [playerId, data] of Object.entries(playerMap)) {
-    const player = await Player.findById(playerId);
-    if (!player) continue;
+    try {
+      const player = await Player.findById(playerId);
+      if (!player) continue;
 
-    player.batting.matches += 1;
+      player.batting.matches += 1;
 
-    if (data.batting) {
-      const b = data.batting;
-      player.batting.innings += 1;
-      player.batting.runs += b.runs;
-      player.batting.ballsFaced += b.balls;
-      player.batting.fours += b.fours;
-      player.batting.sixes += b.sixes;
-      if (!b.isOut) player.batting.notOuts += 1;
-      if (b.runs > player.batting.highestScore) {
-        player.batting.highestScore = b.runs;
+      if (data.batting) {
+        const b = data.batting;
+        player.batting.innings += 1;
+        player.batting.runs += b.runs;
+        player.batting.ballsFaced += b.balls;
+        player.batting.fours += b.fours;
+        player.batting.sixes += b.sixes;
+        if (!b.isOut) player.batting.notOuts += 1;
+        if (b.runs > player.batting.highestScore) {
+          player.batting.highestScore = b.runs;
+        }
+        if (b.runs >= 100) player.batting.hundreds += 1;
+        else if (b.runs >= 50) player.batting.fifties += 1;
       }
-      if (b.runs >= 100) player.batting.hundreds += 1;
-      else if (b.runs >= 50) player.batting.fifties += 1;
-    }
 
-    if (data.bowling && data.bowling.balls > 0) {
-      const bw = data.bowling;
-      player.bowling.innings += 1;
-      player.bowling.oversBowled += bw.overs;
-      player.bowling.ballsBowled += bw.overs * 6 + bw.balls;
-      player.bowling.maidens += bw.maidens;
-      player.bowling.runsConceded += bw.runs;
-      player.bowling.wickets += bw.wickets;
+      if (data.bowling && data.bowling.balls > 0) {
+        const bw = data.bowling;
+        player.bowling.innings += 1;
+        player.bowling.oversBowled += bw.overs;
+        player.bowling.ballsBowled += bw.overs * 6 + bw.balls;
+        player.bowling.maidens += bw.maidens;
+        player.bowling.runsConceded += bw.runs;
+        player.bowling.wickets += bw.wickets;
 
-      if (
-        bw.wickets > player.bowling.bestWickets ||
-        (bw.wickets === player.bowling.bestWickets &&
-          bw.runs < player.bowling.bestRuns)
-      ) {
-        player.bowling.bestWickets = bw.wickets;
-        player.bowling.bestRuns = bw.runs;
+        if (
+          bw.wickets > player.bowling.bestWickets ||
+          (bw.wickets === player.bowling.bestWickets &&
+            bw.runs < player.bowling.bestRuns)
+        ) {
+          player.bowling.bestWickets = bw.wickets;
+          player.bowling.bestRuns = bw.runs;
+        }
+        if (bw.wickets >= 5) player.bowling.fiveWickets += 1;
+        else if (bw.wickets >= 4) player.bowling.fourWickets += 1;
       }
-      if (bw.wickets >= 5) player.bowling.fiveWickets += 1;
-      else if (bw.wickets >= 4) player.bowling.fourWickets += 1;
-    }
 
-    await player.save();
+      await player.save();
+    } catch (err) {
+      console.error(`Failed to aggregate stats for player ${playerId}:`, err);
+    }
   }
 }
 

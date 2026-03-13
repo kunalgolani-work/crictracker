@@ -28,28 +28,27 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
   try {
     const { name, role, jersey, email, password } = req.body;
 
-    if (email) {
-      const existing = await User.findOne({ email: email.toLowerCase() });
-      if (existing) {
-        return res.status(409).json({ error: 'Email already registered' });
-      }
-    }
-
     const player = await Player.create({
       name,
       role,
       jersey: jersey || '-',
     });
 
-    if (email && password) {
-      await User.create({
-        name,
-        email,
-        password,
-        role: 'user',
-        approved: true,
-        linkedPlayer: player._id,
-      });
+    if (email) {
+      const existing = await User.findOne({ email: email.toLowerCase() });
+      if (existing) {
+        existing.linkedPlayer = player._id;
+        await existing.save();
+      } else if (password) {
+        await User.create({
+          name,
+          email,
+          password,
+          role: 'user',
+          approved: true,
+          linkedPlayer: player._id,
+        });
+      }
     }
 
     res.status(201).json(player);
