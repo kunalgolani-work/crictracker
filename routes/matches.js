@@ -1,6 +1,7 @@
 const express = require('express');
 const Match = require('../models/Match');
 const Player = require('../models/Player');
+const Tournament = require('../models/Tournament');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 
 const router = express.Router();
@@ -53,7 +54,7 @@ function populateMatch(query) {
 
 router.post('/', authenticate, requireAdmin, async (req, res) => {
   try {
-    const { teamA, teamB, totalOvers, tossWinner, tossDecision } = req.body;
+    const { teamA, teamB, totalOvers, tossWinner, tossDecision, tournament } = req.body;
 
     if (!teamA || !teamB || !totalOvers) {
       return res
@@ -67,6 +68,7 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
       totalOvers,
       tossWinner: tossWinner || null,
       tossDecision: tossDecision || null,
+      tournament: tournament || null,
       status: 'setup',
       currentInnings: 0,
       innings: [],
@@ -222,9 +224,14 @@ router.post('/:id/ball', authenticate, requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Innings is completed' });
     }
 
-    const { runs = 0, extraType = null, extraRuns = 0, isWicket = false, wicketType = null, outBatsmanId = null, fielderId = null } = req.body;
+    const {
+      runs = 0, extraType = null, extraRuns = 0,
+      isWicket = false, wicketType = null, outBatsmanId = null, fielderId = null,
+      crossed = false, runsCompleted = 0,
+    } = req.body;
 
     const striker = getStriker(inn);
+    const nonStriker = getNonStriker(inn);
     const bowler = getCurrentBowler(inn);
     if (!striker || !bowler) {
       return res.status(400).json({ error: 'No striker or bowler set' });
@@ -235,6 +242,8 @@ router.post('/:id/ball', authenticate, requireAdmin, async (req, res) => {
     const isLegBye = extraType === 'leg_bye';
     const isBye = extraType === 'bye';
     const isLegal = !isWide && !isNoBall;
+    const isRunOut = wicketType === 'run_out';
+    const isCaught = wicketType === 'caught';
 
     let totalRunsThisBall = 0;
     let batsmanRuns = 0;
@@ -273,6 +282,12 @@ router.post('/:id/ball', authenticate, requireAdmin, async (req, res) => {
       striker.balls += 1;
     }
 
+    if (isRunOut && runsCompleted > 0) {
+      totalRunsThisBall += runsCompleted;
+      striker.runs += runsCompleted;
+      if (runsCompleted === 4) striker.fours += 1;
+    }
+
     striker.runs += batsmanRuns;
     if (batsmanRuns === 4) striker.fours += 1;
     if (batsmanRuns === 6) striker.sixes += 1;
@@ -302,6 +317,8 @@ router.post('/:id/ball', authenticate, requireAdmin, async (req, res) => {
             type: wicketType,
             batsman: outBatsmanId || striker.player,
             fielder: fielderId || null,
+            crossed,
+            runsCompleted: isRunOut ? runsCompleted : 0,
           }
         : { type: null, batsman: null, fielder: null },
       isLegal,
@@ -327,7 +344,9 @@ router.post('/:id/ball', authenticate, requireAdmin, async (req, res) => {
         };
       }
       inn.wickets += 1;
-      bowler.wickets += 1;
+      if (wicketType !== 'run_out') {
+        bowler.wickets += 1;
+      }
 
       inn.fallOfWickets.push({
         wicketNum: inn.wickets,
@@ -335,12 +354,37 @@ router.post('/:id/ball', authenticate, requireAdmin, async (req, res) => {
         oversStr: oversString(inn.overs, inn.balls > 6 ? inn.balls % 6 : inn.balls),
         batsman: outBatsman ? outBatsman.player : striker.player,
       });
+
+      // --- Strike rotation on wickets (MCC Laws 18.11, 18.12) ---
+      if (isRunOut) {
+        if (crossed) {
+          swapStrike(inn);
+        }
+        if (runsCompleted > 0 && runsCompleted % 2 === 1 && !crossed) {
+          swapStrike(inn);
+        }
+      } else if (isCaught && crossed) {
+        swapStrike(inn);
+      }
+      // For bowled/lbw/stumped/hit_wicket: no strike swap (new batsman takes dismissed player's position)
     }
 
-    const runsForStrikeSwap = isLegBye || isBye ? extraRuns : batsmanRuns + (isWide ? extraRuns : 0);
-    const shouldSwap = runsForStrikeSwap % 2 === 1;
+    const isEndOfOver = isLegal && inn.balls >= 6;
 
-    if (isLegal && inn.balls >= 6) {
+    if (!isWicket) {
+      const runsForStrikeSwap = isLegBye || isBye ? extraRuns : batsmanRuns + (isWide ? extraRuns : 0);
+      const shouldSwap = runsForStrikeSwap % 2 === 1;
+
+      if (isEndOfOver) {
+        if (!shouldSwap) {
+          swapStrike(inn);
+        }
+      } else if (shouldSwap) {
+        swapStrike(inn);
+      }
+    }
+
+    if (isEndOfOver) {
       inn.overs += 1;
       inn.balls = 0;
 
@@ -353,11 +397,9 @@ router.post('/:id/ball', authenticate, requireAdmin, async (req, res) => {
       bowler.balls = 0;
       bowler.isCurrentBowler = false;
 
-      if (!shouldSwap) {
+      if (isWicket) {
         swapStrike(inn);
       }
-    } else if (shouldSwap && !isWicket) {
-      swapStrike(inn);
     }
 
     const totalPlayersOnTeam = await getTeamPlayerCount(inn.battingTeam);
@@ -421,7 +463,9 @@ router.post('/:id/undo', authenticate, requireAdmin, async (req, res) => {
       const bowlerEntry = inn.bowlers.find(
         (b) => b.player.toString() === lastBall.bowler.toString()
       );
-      if (bowlerEntry) bowlerEntry.wickets -= 1;
+      if (bowlerEntry && lastBall.wicket?.type !== 'run_out') {
+        bowlerEntry.wickets -= 1;
+      }
 
       const newBatsman = inn.batsmen.find(
         (b) =>
@@ -439,6 +483,30 @@ router.post('/:id/undo', authenticate, requireAdmin, async (req, res) => {
       if (outBatsman) {
         outBatsman.isOnStrike =
           lastBall.batsman.toString() === outBatsman.player.toString();
+      }
+
+      const wasRunOut = lastBall.wicket?.type === 'run_out';
+      const wasCaught = lastBall.wicket?.type === 'caught';
+      const wasCrossed = lastBall.wicket?.crossed || false;
+      const undoRunsCompleted = wasRunOut ? (lastBall.wicket?.runsCompleted || 0) : 0;
+
+      if (undoRunsCompleted > 0) {
+        inn.totalRuns -= undoRunsCompleted;
+        const batEntry = inn.batsmen.find(
+          (b) => b.player.toString() === lastBall.batsman.toString()
+        );
+        if (batEntry) {
+          batEntry.runs -= undoRunsCompleted;
+          if (undoRunsCompleted === 4) batEntry.fours -= 1;
+        }
+      }
+
+      if (wasRunOut && wasCrossed) {
+        swapStrike(inn);
+      } else if (wasRunOut && undoRunsCompleted > 0 && undoRunsCompleted % 2 === 1 && !wasCrossed) {
+        swapStrike(inn);
+      } else if (wasCaught && wasCrossed) {
+        swapStrike(inn);
       }
     }
 
@@ -742,6 +810,24 @@ router.post(
         await aggregatePlayerStats(match);
       } catch (statsErr) {
         console.error('Stats aggregation error (non-fatal):', statsErr);
+      }
+
+      if (match.tournament) {
+        try {
+          const tournament = await Tournament.findById(match.tournament);
+          if (tournament) {
+            if (!tournament.matches.some((m) => m.toString() === match._id.toString())) {
+              tournament.matches.push(match._id);
+            }
+            const { recalculateTally } = require('./tournaments');
+            const tournamentMatches = await Match.find({ _id: { $in: tournament.matches } });
+            recalculateTally(tournament, tournamentMatches);
+            if (tournament.status === 'upcoming') tournament.status = 'live';
+            await tournament.save();
+          }
+        } catch (tournErr) {
+          console.error('Tournament tally update error (non-fatal):', tournErr);
+        }
       }
 
       const populated = await populateMatch(Match.findById(match._id));

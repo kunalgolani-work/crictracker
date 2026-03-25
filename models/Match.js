@@ -156,6 +156,7 @@ const matchSchema = new mongoose.Schema(
     innings: [inningsSchema],
     result: { type: String, default: '' },
     winner: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
+    tournament: { type: mongoose.Schema.Types.ObjectId, ref: 'Tournament', default: null },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true }
